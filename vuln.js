@@ -1,6 +1,7 @@
-// secure-demo.js
+// secure-final.js
 
 const express = require("express");
+const rateLimit = require("express-rate-limit");
 const { execFile } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -10,19 +11,27 @@ const crypto = require("crypto");
 const app = express();
 app.use(express.json());
 
-// ✅ 1. Use environment variable (no hardcoded secret)
+// ✅ Rate limiter (global or per-route)
+const limiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+// ✅ Use environment variable
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
-  throw new Error("JWT_SECRET must be set in environment variables");
+  throw new Error("JWT_SECRET must be set");
 }
 
-// ✅ Helper: basic input validation
+// ✅ Sanitize input
 function sanitize(input) {
   return String(input).replace(/[<>]/g, "");
 }
 
-// ✅ 2. Secure JWT usage (expiry + stronger handling)
-app.post("/token", (req, res) => {
+// ✅ Token generation
+app.post("/token", limiter, (req, res) => {
   const user = sanitize(req.body.user || "guest");
 
   const token = jwt.sign(
@@ -37,7 +46,7 @@ app.post("/token", (req, res) => {
   res.json({ token });
 });
 
-// ✅ Middleware: authentication
+// ✅ Auth middleware
 function authMiddleware(req, res, next) {
   const authHeader = req.headers.authorization;
   if (!authHeader) return res.status(401).send("Unauthorized");
@@ -51,28 +60,27 @@ function authMiddleware(req, res, next) {
   }
 }
 
-// ✅ 3. Protect admin route
-app.get("/admin", authMiddleware, (req, res) => {
+// ✅ Protected admin (with rate limiting)
+app.get("/admin", limiter, authMiddleware, (req, res) => {
   res.send("Secure admin data");
 });
 
-// ✅ 4. Prevent command injection (use execFile + whitelist)
-app.get("/ping", (req, res) => {
+// ✅ Safe command execution
+app.get("/ping", limiter, (req, res) => {
   const host = req.query.host;
 
-  // simple validation
   if (!/^[a-zA-Z0-9.\-]+$/.test(host)) {
     return res.status(400).send("Invalid host");
   }
 
-  execFile("ping", ["-c", "1", host], (err, stdout, stderr) => {
+  execFile("ping", ["-c", "1", host], (err, stdout) => {
     if (err) return res.status(500).send("Ping failed");
     res.send(stdout);
   });
 });
 
-// ✅ 5. Prevent path traversal
-app.get("/read", (req, res) => {
+// ✅ Safe file read
+app.get("/read", limiter, (req, res) => {
   const file = req.query.file;
 
   const baseDir = path.join(__dirname, "files");
@@ -90,37 +98,38 @@ app.get("/read", (req, res) => {
   }
 });
 
-// ✅ 6. Prevent XSS (escape output)
+// ✅ Prevent XSS
 app.get("/search", (req, res) => {
   const q = sanitize(req.query.q || "");
   res.send(`<h1>Results for: ${q}</h1>`);
 });
 
-// ✅ 7. Prevent open redirect
+// ✅ FIXED Open Redirect (whitelist only)
 app.get("/redirect", (req, res) => {
-  const url = req.query.url;
+  const key = req.query.url;
 
-  const allowedDomain = "example.com";
-  try {
-    const parsed = new URL(url);
+  const ALLOWED_REDIRECTS = {
+    home: "/",
+    profile: "/profile",
+    help: "/help"
+  };
 
-    if (parsed.hostname !== allowedDomain) {
-      return res.status(400).send("Invalid redirect");
-    }
+  const target = ALLOWED_REDIRECTS[key];
 
-    res.redirect(url);
-  } catch {
-    res.status(400).send("Invalid URL");
+  if (!target) {
+    return res.status(400).send("Invalid redirect");
   }
+
+  res.redirect(target);
 });
 
-// ✅ 8. Secure random token
+// ✅ Secure random token
 app.get("/reset-token", (req, res) => {
   const token = crypto.randomBytes(32).toString("hex");
   res.send({ resetToken: token });
 });
 
-// ✅ 9. Avoid sensitive error leakage
+// ✅ No sensitive error leakage
 app.get("/error", (req, res) => {
   try {
     throw new Error("Internal error");
@@ -129,7 +138,7 @@ app.get("/error", (req, res) => {
   }
 });
 
-// ✅ 10. Prevent prototype pollution
+// ✅ Prevent prototype pollution
 app.post("/merge", (req, res) => {
   const target = {};
 
