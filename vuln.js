@@ -1,81 +1,146 @@
-// vulnerable-demo.js
-// Intentionally vulnerable code for scanner testing only.
+// secure-demo.js
 
 const express = require("express");
-const { exec } = require("child_process");
+const { execFile } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 const jwt = require("jsonwebtoken");
+const crypto = require("crypto");
 
 const app = express();
 app.use(express.json());
 
-// 1. Hardcoded secret
-const JWT_SECRET = "super-secret-hardcoded-key";
+// ✅ 1. Use environment variable (no hardcoded secret)
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET must be set in environment variables");
+}
 
-// 2. Weak JWT usage
+// ✅ Helper: basic input validation
+function sanitize(input) {
+  return String(input).replace(/[<>]/g, "");
+}
+
+// ✅ 2. Secure JWT usage (expiry + stronger handling)
 app.post("/token", (req, res) => {
-  const user = req.body.user || "guest";
-  const token = jwt.sign({ user }, JWT_SECRET, { algorithm: "HS256" });
+  const user = sanitize(req.body.user || "guest");
+
+  const token = jwt.sign(
+    { user },
+    JWT_SECRET,
+    {
+      algorithm: "HS256",
+      expiresIn: "1h"
+    }
+  );
+
   res.json({ token });
 });
 
-// 3. No auth / no authorization
-app.get("/admin", (req, res) => {
-  res.send("Sensitive admin data");
+// ✅ Middleware: authentication
+function authMiddleware(req, res, next) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader) return res.status(401).send("Unauthorized");
+
+  try {
+    const token = authHeader.split(" ")[1];
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    return res.status(403).send("Invalid token");
+  }
+}
+
+// ✅ 3. Protect admin route
+app.get("/admin", authMiddleware, (req, res) => {
+  res.send("Secure admin data");
 });
 
-// 4. Command injection
+// ✅ 4. Prevent command injection (use execFile + whitelist)
 app.get("/ping", (req, res) => {
   const host = req.query.host;
-  exec(`ping -c 1 ${host}`, (err, stdout, stderr) => {
-    if (err) {
-      return res.status(500).send(stderr);
-    }
+
+  // simple validation
+  if (!/^[a-zA-Z0-9.\-]+$/.test(host)) {
+    return res.status(400).send("Invalid host");
+  }
+
+  execFile("ping", ["-c", "1", host], (err, stdout, stderr) => {
+    if (err) return res.status(500).send("Ping failed");
     res.send(stdout);
   });
 });
 
-// 5. Path traversal
+// ✅ 5. Prevent path traversal
 app.get("/read", (req, res) => {
   const file = req.query.file;
-  const data = fs.readFileSync(`./files/${file}`, "utf8");
-  res.send(data);
-});
 
-// 6. Reflected XSS
-app.get("/search", (req, res) => {
-  const q = req.query.q || "";
-  res.send(`<h1>Results for: ${q}</h1>`);
-});
+  const baseDir = path.join(__dirname, "files");
+  const filePath = path.normalize(path.join(baseDir, file));
 
-// 7. Open redirect
-app.get("/redirect", (req, res) => {
-  const url = req.query.url;
-  res.redirect(url);
-});
+  if (!filePath.startsWith(baseDir)) {
+    return res.status(400).send("Invalid file path");
+  }
 
-// 8. Insecure random for security token
-app.get("/reset-token", (req, res) => {
-  const token = Math.random().toString(36).slice(2);
-  res.send({ resetToken: token });
-});
-
-// 9. Sensitive error leak
-app.get("/error", (req, res) => {
   try {
-    throw new Error("Database password is pass@123");
-  } catch (e) {
-    res.status(500).send(e.stack);
+    const data = fs.readFileSync(filePath, "utf8");
+    res.send(data);
+  } catch {
+    res.status(404).send("File not found");
   }
 });
 
-// 10. Prototype pollution style unsafe merge
+// ✅ 6. Prevent XSS (escape output)
+app.get("/search", (req, res) => {
+  const q = sanitize(req.query.q || "");
+  res.send(`<h1>Results for: ${q}</h1>`);
+});
+
+// ✅ 7. Prevent open redirect
+app.get("/redirect", (req, res) => {
+  const url = req.query.url;
+
+  const allowedDomain = "example.com";
+  try {
+    const parsed = new URL(url);
+
+    if (parsed.hostname !== allowedDomain) {
+      return res.status(400).send("Invalid redirect");
+    }
+
+    res.redirect(url);
+  } catch {
+    res.status(400).send("Invalid URL");
+  }
+});
+
+// ✅ 8. Secure random token
+app.get("/reset-token", (req, res) => {
+  const token = crypto.randomBytes(32).toString("hex");
+  res.send({ resetToken: token });
+});
+
+// ✅ 9. Avoid sensitive error leakage
+app.get("/error", (req, res) => {
+  try {
+    throw new Error("Internal error");
+  } catch {
+    res.status(500).send("Something went wrong");
+  }
+});
+
+// ✅ 10. Prevent prototype pollution
 app.post("/merge", (req, res) => {
   const target = {};
-  Object.assign(target, req.body);
+
+  for (const key in req.body) {
+    if (key === "__proto__" || key === "constructor") continue;
+    target[key] = req.body[key];
+  }
+
   res.json(target);
 });
 
 app.listen(3000, () => {
-  console.log("Vulnerable demo app running on port 3000");
+  console.log("Secure app running on port 3000");
 });
