@@ -1,0 +1,25 @@
+name: CodeQL Scan
+
+on:
+  pull_request:
+    branches: ["dev", "stage", "main"]
+
+jobs:
+  analyze:
+    name: CodeQL Analysis
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: javascript
+
+      - uses: github/codeql-action/autobuild@v3
+
+      - uses: github/codeql-action/analyze@v3
