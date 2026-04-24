@@ -1,0 +1,100 @@
+name: Security IaC Scan
+
+on:
+  pull_request:
+    branches: ["dev", "stage", "main"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  trivy-iac-scan:
+    name: Security IaC Scan
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create report directory
+        run: mkdir -p security_report
+
+      - name: Run Trivy IaC scan
+        id: trivy
+        uses: aquasecurity/trivy-action@0.35.0
+        continue-on-error: true
+        with:
+          scan-type: config
+          scan-ref: .
+          format: json
+          output: security_report/trivy-iac-results.json
+          severity: HIGH,CRITICAL,MEDIUM
+          hide-progress: true
+          exit-code: 1
+
+      - name: Generate summary content
+        id: summary
+        shell: bash
+        run: |
+          COUNT=$(jq '[.Results[]?.Misconfigurations[]?] | length' security_report/trivy-iac-results.json)
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "comment<<EOF"
+            echo "## Security IaC Scan Result"
+            echo ""
+            echo "- Total findings: **$COUNT**"
+            echo ""
+            echo "| Severity | ID | Title | File |"
+            echo "|---|---|---|---|"
+
+            jq -r '
+              [
+                .Results[]? as $r
+                | $r.Misconfigurations[]?
+                | {
+                    severity: .Severity,
+                    id: .ID,
+                    title: (.Title | gsub("\n"; " ")),
+                    file: $r.Target
+                  }
+              ]
+              | sort_by(
+                  if .severity == "CRITICAL" then 0
+                  elif .severity == "HIGH" then 1
+                  elif .severity == "MEDIUM" then 2
+                  else 3 end
+                )
+              | .[:20]
+              | if length == 0 then
+                  "| N/A | N/A | No findings | N/A |"
+                else
+                  .[] | "| \(.severity) | \(.id) | \(.title) | \(.file) |"
+                end
+            ' security_report/trivy-iac-results.json
+
+            echo ""
+            echo "_Showing up to 20 findings._"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Write PR summary
+        if: always()
+        run: |
+          echo "${{ steps.summary.outputs.comment }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Add PR comment
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: trivy-iac-scan
+          message: ${{ steps.summary.outputs.comment }}
+
+      - name: Fail PR on findings
+        if: steps.summary.outputs.count != '0'
+        run: |
+          echo "Trivy IaC scan found ${{ steps.summary.outputs.count }} findings."
+          exit 1
